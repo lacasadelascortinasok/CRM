@@ -1,0 +1,1955 @@
+import React, { useState, useEffect, useRef } from 'react';
+
+// Importaciones de Firebase
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInWithCustomToken, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, collection, onSnapshot, addDoc, serverTimestamp, updateDoc, doc, query, where, getDocs } from 'firebase/firestore';
+
+// Importaciones de iconos
+import { Home, Users, Store, BarChart, MessageSquareText, Loader2, CheckCircle, XCircle, Bot, Image as ImageIcon, CalendarDays, Bookmark, BookMarked, Rocket, Filter, Copy, User, Send, Plus, Trash2, ExternalLink, Sparkles, FolderArchive, DollarSign } from 'lucide-react';
+
+// Se asume que las variables globales están disponibles en el entorno de Canvas
+const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+// Configuración de la API de Gemini (debe dejarse como string vacío para que el sistema lo complete)
+const geminiApiKey = "";
+const geminiApiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${geminiApiKey}`;
+
+// Helper function to get status color
+const getStatusColor = (status) => {
+  switch (status) {
+    case 'En Progreso':
+    case 'Vendido':
+    case 'Presupuestar':
+      return 'bg-blue-200 text-blue-800';
+    case 'Potenciales Clientes':
+      return 'bg-violet-200 text-violet-800';
+    case 'Entregado':
+      return 'bg-green-200 text-green-800';
+    case 'Primer Contacto':
+    case 'Por Vencer':
+      return 'bg-yellow-200 text-yellow-800';
+    case 'Alerta de Vencimiento':
+    case 'Vencido':
+      return 'bg-red-200 text-red-800';
+    case 'Archivados':
+      return 'bg-gray-200 text-gray-800';
+    default:
+      return 'bg-gray-200 text-gray-800';
+  }
+};
+
+// Componente del Modal de Detalles del Cliente, ahora reutilizable y con proyectos
+const ClientDetailsModal = ({ client, projects, onClose }) => {
+  if (!client) return null;
+
+  // Filtrar los proyectos que corresponden al cliente
+  const clientProjects = projects.filter(p => p.clientId === client.id);
+
+  return (
+    <div className="fixed inset-0 bg-gray-900 bg-opacity-50 flex items-center justify-center z-50">
+      <div className="bg-white p-8 rounded-xl shadow-xl max-w-2xl w-full mx-4">
+        <div className="flex justify-between items-center mb-4">
+          <h3 className="text-2xl font-bold text-gray-800">Ficha de {client.name}</h3>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
+            <XCircle size={24} />
+          </button>
+        </div>
+        <div className="space-y-4 text-gray-700 mb-6">
+          <p><span className="font-semibold">Email:</span> {client.email}</p>
+          <p><span className="font-semibold">Teléfono:</span> {client.phone || 'N/A'}</p>
+          <p><span className="font-semibold">Dirección:</span> {client.address || 'N/A'}</p>
+          <p><span className="font-semibold">Detalles del Proyecto:</span> {client.projectDetails || 'N/A'}</p>
+          <p><span className="font-semibold">Notas de Seguimiento:</span> {client.notes || 'N/A'}</p>
+          <p><span className="font-semibold">Estado en CRM:</span> <span className={`text-xs font-semibold px-2.5 py-0.5 rounded-full ${getStatusColor(client.status)}`}>{client.status}</span></p>
+        </div>
+
+        {/* Sección de Proyectos Vinculados */}
+        <div className="mt-4 border-t pt-4">
+          <h4 className="text-xl font-bold text-gray-800 mb-4">Proyectos Vinculados</h4>
+          {clientProjects.length > 0 ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {clientProjects.map(project => {
+                  let currentStatus = project.status;
+                  let statusColor = getStatusColor(currentStatus);
+
+                  if (project.dueDate && project.status !== 'Entregado') {
+                      const now = new Date();
+                      const dueDate = new Date(project.dueDate);
+                      const diffInDays = (dueDate - now) / (1000 * 60 * 60 * 24);
+                      if (diffInDays <= 10 && diffInDays > 0) {
+                          currentStatus = 'Alerta de Vencimiento';
+                          statusColor = getStatusColor(currentStatus);
+                      } else if (diffInDays <= 0) {
+                          currentStatus = 'Vencido';
+                          statusColor = getStatusColor(currentStatus);
+                      } else if (diffInDays > 10) {
+                          currentStatus = 'Por Vencer';
+                          statusColor = getStatusColor(currentStatus);
+                      }
+                  }
+
+                  return (
+                    <div key={project.id} className="p-4 bg-gray-50 rounded-lg shadow-sm border border-gray-200">
+                      <p className="font-semibold text-lg">{project.title}</p>
+                      <p className="text-sm text-gray-600 mt-1">{project.description}</p>
+                      <div className="flex items-center justify-between mt-3">
+                        <span className={`text-xs font-semibold px-2.5 py-0.5 rounded-full ${statusColor}`}>
+                          {currentStatus}
+                        </span>
+                        {project.dueDate && (
+                          <p className="text-sm text-gray-500">Fecha de Entrega: {project.dueDate}</p>
+                        )}
+                      </div>
+                    </div>
+                  );
+              })}
+            </div>
+          ) : (
+            <p className="text-gray-500">No hay proyectos vinculados a este cliente.</p>
+          )}
+        </div>
+
+        <div className="mt-6 flex justify-end">
+          <button
+            onClick={onClose}
+            className="bg-indigo-600 text-white p-2 rounded-lg font-semibold hover:bg-indigo-700 transition-colors duration-200"
+          >
+            Cerrar
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+
+// Configuración inicial de la aplicación React
+const App = () => {
+  const [activePage, setActivePage] = useState('dashboard');
+  const [db, setDb] = useState(null);
+  const [auth, setAuth] = useState(null);
+  const [userId, setUserId] = useState(null);
+  const [contacts, setContacts] = useState([]);
+  const [quotes, setQuotes] = useState([]);
+  const [projects, setProjects] = useState([]);
+  const [appointments, setAppointments] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [isAuthReady, setIsAuthReady] = useState(false);
+  const [generationLoading, setGenerationLoading] = useState(false);
+  const [generatedContent, setGeneratedContent] = useState('');
+  const [notification, setNotification] = useState({ message: '', type: '' });
+
+  // Estados para el Dashboard
+  const [pendingQuotesCount, setPendingQuotesCount] = useState(0);
+  const [expiringProjectsCount, setExpiringProjectsCount] = useState(0);
+
+  // Estados para el modal de detalles del cliente (ahora centralizado)
+  const [selectedClientForModal, setSelectedClientForModal] = useState(null);
+  const [isClientModalOpen, setIsClientModalOpen] = useState(false);
+  const [analyzingClientId, setAnalyzingClientId] = useState(null);
+
+  // Función para abrir el modal de detalles del cliente
+  const openClientDetailsModal = (client) => {
+    setSelectedClientForModal(client);
+    setIsClientModalOpen(true);
+  };
+
+  // Función para cerrar el modal de detalles del cliente
+  const closeClientDetailsModal = () => {
+    setIsClientModalOpen(false);
+    setSelectedClientForModal(null);
+  };
+
+  // Función para mostrar notificaciones temporales
+  const showNotification = (message, type) => {
+    setNotification({ message, type });
+    setTimeout(() => {
+      setNotification({ message: '', type: '' });
+    }, 3000);
+  };
+
+  // Función para actualizar el estado de un contacto en Firestore
+  const updateContactStatus = async (contactId, newStatus) => {
+    if (!db) {
+        showNotification('Error: No se pudo conectar a la base de datos.', 'error');
+        return;
+    }
+    const contactRef = doc(db, `/artifacts/${appId}/public/data/la_casa_de_las_cortinas_contacts`, contactId);
+    try {
+        await updateDoc(contactRef, { status: newStatus });
+        showNotification(`Estado del contacto actualizado a ${newStatus}`, 'success');
+    } catch (error) {
+        console.error("Error al actualizar el estado del contacto:", error);
+        showNotification('Error al actualizar el estado del contacto.', 'error');
+    }
+  };
+
+  // Función para actualizar el estado de una cotización en Firestore
+  const updateQuoteStatus = async (quoteId, newStatus) => {
+    if (!db) {
+        showNotification('Error: No se pudo conectar a la base de datos.', 'error');
+        return;
+    }
+    const quoteRef = doc(db, `/artifacts/${appId}/public/data/la_casa_de_las_cortinas_quotes`, quoteId);
+    try {
+        await updateDoc(quoteRef, { status: newStatus });
+        showNotification(`Estado del presupuesto actualizado a ${newStatus}`, 'success');
+    } catch (error) {
+        console.error("Error al actualizar el estado del presupuesto:", error);
+        showNotification('Error al actualizar el estado del presupuesto.', 'error');
+    }
+  };
+
+  // Inicialización de Firebase
+  useEffect(() => {
+    const initFirebase = async () => {
+      try {
+        const app = initializeApp(firebaseConfig);
+        const firestore = getFirestore(app);
+        const authInstance = getAuth(app);
+
+        setDb(firestore);
+        setAuth(authInstance);
+
+        // Intenta iniciar sesión con el token de autenticación personalizado o de forma anónima
+        await new Promise((resolve) => {
+          onAuthStateChanged(authInstance, async (user) => {
+            if (user) {
+              setUserId(user.uid);
+              resolve();
+            } else {
+              try {
+                if (initialAuthToken) {
+                  await signInWithCustomToken(authInstance, initialAuthToken);
+                } else {
+                  await signInAnonymously(authInstance);
+                }
+                setUserId(authInstance.currentUser.uid);
+                resolve();
+              } catch (error) {
+                console.error("Firebase Auth Error:", error);
+                setUserId('anonymous');
+                resolve();
+              }
+            }
+            setIsAuthReady(true);
+          });
+        });
+      } catch (error) {
+        console.error("Error al inicializar Firebase:", error);
+        setLoading(false);
+        setIsAuthReady(true);
+        showNotification('Error al conectar con la base de datos.', 'error');
+      }
+    };
+
+    initFirebase();
+  }, []);
+
+  // Escuchar los contactos, citas, proyectos y presupuestos en tiempo real desde Firestore
+  useEffect(() => {
+    if (!db || !isAuthReady) return;
+
+    // Rutas de colección para los datos de la plataforma
+    const contactsCollectionPath = `/artifacts/${appId}/public/data/la_casa_de_las_cortinas_contacts`;
+    const quotesCollectionPath = `/artifacts/${appId}/public/data/la_casa_de_las_cortinas_quotes`;
+    const projectsCollectionPath = `/artifacts/${appId}/public/data/la_casa_de_las_cortinas_projects`;
+    const appointmentsCollectionPath = `/artifacts/${appId}/public/data/la_casa_de_las_cortinas_appointments`;
+
+    // Escuchar contactos
+    const unsubscribeContacts = onSnapshot(collection(db, contactsCollectionPath), (snapshot) => {
+      const contactsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setContacts(contactsData);
+    }, (error) => {
+      console.error("Error al obtener los contactos:", error);
+    });
+
+    // Escuchar cotizaciones
+    const unsubscribeQuotes = onSnapshot(collection(db, quotesCollectionPath), (snapshot) => {
+      const quotesData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setQuotes(quotesData);
+      setPendingQuotesCount(quotesData.filter(q => q.status === 'Pendiente').length);
+    }, (error) => {
+      console.error("Error al obtener las cotizaciones:", error);
+    });
+
+    // Escuchar proyectos
+    const unsubscribeProjects = onSnapshot(collection(db, projectsCollectionPath), (snapshot) => {
+      const projectsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setProjects(projectsData);
+      // Calcular proyectos por vencer
+      const now = new Date();
+      const expiring = projectsData.filter(p => {
+        if (!p.dueDate || p.status === 'Entregado') return false;
+        const dueDate = new Date(p.dueDate);
+        const diffInDays = (dueDate - now) / (1000 * 60 * 60 * 24);
+        return diffInDays <= 10 && diffInDays > 0;
+      });
+      setExpiringProjectsCount(expiring.length);
+    }, (error) => {
+      console.error("Error al obtener los proyectos:", error);
+    });
+
+    // Escuchar citas
+    const unsubscribeAppointments = onSnapshot(collection(db, appointmentsCollectionPath), (snapshot) => {
+      const appointmentsData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+      setAppointments(appointmentsData);
+      setLoading(false);
+    }, (error) => {
+      console.error("Error al obtener las citas:", error);
+      setLoading(false);
+    });
+
+    return () => {
+      unsubscribeContacts();
+      unsubscribeQuotes();
+      unsubscribeProjects();
+      unsubscribeAppointments();
+    };
+  }, [db, isAuthReady, appId]);
+
+  // Función para generar contenido con Gemini
+  const generateContentWithGemini = async (prompt) => {
+    setGenerationLoading(true);
+    setGeneratedContent('');
+    try {
+      let retryCount = 0;
+      const maxRetries = 3;
+      let response;
+
+      while (retryCount < maxRetries) {
+        try {
+          const chatHistory = [{ role: "user", parts: [{ text: prompt }] }];
+          const payload = { contents: chatHistory };
+
+          response = await fetch(geminiApiUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+
+          if (!response.ok) {
+            if (response.status === 429) { // Límite de cuota, intentar de nuevo
+              const delay = Math.pow(2, retryCount) * 1000;
+              await new Promise(resolve => setTimeout(resolve, delay));
+              retryCount++;
+              continue;
+            } else {
+              throw new Error(`Error en la API: ${response.status} ${response.statusText}`);
+            }
+          }
+
+          const result = await response.json();
+          const text = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+          if (text) {
+            setGeneratedContent(text);
+            showNotification('Contenido generado exitosamente.', 'success');
+          } else {
+            setGeneratedContent('No se pudo generar el contenido. Inténtalo de nuevo.');
+            showNotification('Error al generar el contenido.', 'error');
+          }
+          break; // Salir del bucle si la llamada fue exitosa
+        } catch (error) {
+          console.error("Error al llamar a la API de Gemini:", error);
+          if (retryCount < maxRetries - 1) {
+            const delay = Math.pow(2, retryCount) * 1000;
+            await new Promise(resolve => setTimeout(resolve, delay));
+            retryCount++;
+          } else {
+            throw error;
+          }
+        }
+      }
+    } catch (error) {
+      console.error("Error al generar contenido:", error);
+      setGeneratedContent('Hubo un error al generar el contenido.');
+      showNotification('Error grave al generar el contenido.', 'error');
+    } finally {
+      setGenerationLoading(false);
+    }
+  };
+
+  // Función para generar contenido del chatbot
+  const generateChatbotResponse = async (userMessage) => {
+    try {
+      let retryCount = 0;
+      const maxRetries = 3;
+      let response;
+
+      while (retryCount < maxRetries) {
+        try {
+          const prompt = `Eres el chatbot de una cortinería llamada "La Casa de las Cortinas". Respondes de forma amable y profesional. Tu objetivo es ayudar a los clientes con preguntas sobre tipos de cortinas (ej. roller, romanas), toldos, telas, persianas, toma de medidas, instalación, o agendar una cita. También puedes informar que para solicitar una cotización pueden usar el formulario de la página. El usuario dice: "${userMessage}".`;
+          const chatHistory = [{ role: "user", parts: [{ text: prompt }] }];
+          const payload = { contents: chatHistory };
+
+          response = await fetch(geminiApiUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+
+          if (!response.ok) {
+            if (response.status === 429) {
+              const delay = Math.pow(2, retryCount) * 1000;
+              await new Promise(resolve => setTimeout(resolve, delay));
+              retryCount++;
+              continue;
+            } else {
+              throw new Error(`Error en la API: ${response.status} ${response.statusText}`);
+            }
+          }
+
+          const result = await response.json();
+          return result?.candidates?.[0]?.content?.parts?.[0]?.text || 'No pude generar una respuesta. Por favor, inténtalo de nuevo.';
+        } catch (error) {
+          console.error("Error al llamar a la API de Gemini:", error);
+          if (retryCount < maxRetries - 1) {
+            const delay = Math.pow(2, retryCount) * 1000;
+            await new Promise(resolve => setTimeout(resolve, delay));
+            retryCount++;
+          } else {
+            return 'Lo siento, hubo un error al conectar con el servicio de IA.';
+          }
+        }
+      }
+      return 'Lo siento, hubo un error al conectar con el servicio de IA.';
+    } catch (error) {
+      return 'Hubo un error grave. Por favor, inténtalo de nuevo más tarde.';
+    }
+  };
+
+  // Función para analizar un cliente con IA
+  const analyzeClientWithAI = async (client) => {
+    setAnalyzingClientId(client.id);
+    const prompt = `Analiza la siguiente información de un cliente de una cortinería y determina si es un "Potencial Cliente". Un cliente potencial es aquel que tiene detalles específicos del proyecto (medidas, tipo de cortina) o muestra un interés claro en una cotización. Responde SOLO con un JSON en el formato {"is_potential": boolean, "reason": "string"}. La información es: Nombre: ${client.name}, Detalles del Proyecto: ${client.projectDetails}, Notas: ${client.notes}.`;
+
+    try {
+        let retryCount = 0;
+        const maxRetries = 3;
+        let response;
+        const payload = {
+            contents: [{ role: "user", parts: [{ text: prompt }] }],
+            generationConfig: {
+                responseMimeType: "application/json",
+                responseSchema: {
+                    type: "OBJECT",
+                    properties: {
+                        "is_potential": { "type": "BOOLEAN" },
+                        "reason": { "type": "STRING" }
+                    },
+                    "propertyOrdering": ["is_potential", "reason"]
+                }
+            }
+        };
+
+        while (retryCount < maxRetries) {
+            try {
+                response = await fetch(geminiApiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                if (!response.ok) {
+                    if (response.status === 429) {
+                        const delay = Math.pow(2, retryCount) * 1000;
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                        retryCount++;
+                        continue;
+                    }
+                    throw new Error(`API Error: ${response.status} ${response.statusText}`);
+                }
+                const result = await response.json();
+                const jsonText = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+                if (jsonText) {
+                    const analysis = JSON.parse(jsonText);
+                    if (analysis.is_potential) {
+                        await updateContactStatus(client.id, 'Potenciales Clientes');
+                        showNotification('Cliente analizado: ¡Es un cliente potencial!', 'success');
+                    } else {
+                        showNotification(`Cliente analizado: No parece ser potencial. Razón: ${analysis.reason}`, 'error');
+                    }
+                } else {
+                    showNotification('Error al analizar el cliente: No se recibió una respuesta válida.', 'error');
+                }
+                break;
+            } catch (error) {
+                console.error("Error al llamar a la API de Gemini para análisis:", error);
+                if (retryCount < maxRetries - 1) {
+                    const delay = Math.pow(2, retryCount) * 1000;
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                    retryCount++;
+                } else {
+                    throw error;
+                }
+            }
+        }
+    } catch (error) {
+        console.error("Error al analizar el cliente:", error);
+        showNotification('Error grave al analizar el cliente con IA.', 'error');
+    } finally {
+        setAnalyzingClientId(null);
+    }
+  };
+
+
+  // Componente del panel de navegación lateral
+  const Sidebar = () => (
+    <div className="bg-gray-800 text-white w-64 p-4 flex flex-col h-full rounded-l-2xl shadow-lg">
+      <div className="flex items-center space-x-2 mb-8">
+        <Store size={24} />
+        <h1 className="text-2xl font-bold">La Casa de las Cortinas</h1>
+      </div>
+      <nav className="space-y-2">
+        <SidebarItem icon={<Home size={20} />} text="Dashboard" page="dashboard" />
+        <SidebarItem icon={<Users size={20} />} text="Clientes (CRM)" page="crm" />
+        <SidebarItem icon={<BookMarked size={20} />} text="Cotizaciones" page="quotes" />
+        <SidebarItem icon={<ImageIcon size={20} />} text="Galería" page="gallery" />
+        <SidebarItem icon={<CalendarDays size={20} />} text="Calendario" page="calendar" />
+        <SidebarItem icon={<BarChart size={20} />} text="Ads (Cortinas)" page="ads" />
+        <SidebarItem icon={<Rocket size={20} />} text="RRSS" page="social" />
+        <SidebarItem icon={<MessageSquareText size={20} />} text="WhatsApp" page="whatsapp" />
+        <SidebarItem icon={<Bot size={20} />} text="Chatbot" page="chatbot" />
+      </nav>
+      {userId && (
+        <div className="mt-auto text-xs text-gray-400 p-2 border-t border-gray-700">
+          <p>ID de Usuario: {userId}</p>
+        </div>
+      )}
+    </div>
+  );
+
+  // Componente para un elemento del menú lateral
+  const SidebarItem = ({ icon, text, page }) => (
+    <button
+      onClick={() => {
+        setActivePage(page);
+        setGeneratedContent('');
+      }}
+      className={`flex items-center space-x-3 p-3 rounded-lg w-full text-left transition-colors duration-200 ${
+        activePage === page ? 'bg-indigo-600 text-white' : 'hover:bg-gray-700'
+      }`}
+    >
+      {icon}
+      <span>{text}</span>
+    </button>
+  );
+
+  // Componente del dashboard
+  const Dashboard = () => (
+    <div className="p-8">
+      <h2 className="text-4xl font-bold mb-4 text-gray-800">Panel de Control de La Casa de las Cortinas</h2>
+      <p className="text-lg text-gray-600">
+        Gestión simplificada para tu negocio de Cortinas y Toldos.
+      </p>
+      <div className="mt-8 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        <Card title="Total de Clientes" value={contacts.length} />
+        <Card title="Pedidos de Cotización" value={quotes.length} />
+        <Card title="Citas Agendadas" value={appointments.length} />
+      </div>
+
+      {/* Nuevas tarjetas de notificaciones */}
+      <div className="mt-8 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        <Card title="Presupuestos Pendientes" value={pendingQuotesCount} color="bg-yellow-100 text-yellow-800" icon={<BookMarked size={24} />} />
+        <Card title="Proyectos por Vencer" value={expiringProjectsCount} color="bg-red-100 text-red-800" icon={<CalendarDays size={24} />} />
+      </div>
+
+    </div>
+  );
+
+  // Componente de tarjeta para el dashboard
+  const Card = ({ title, value, color = 'bg-white', icon }) => (
+    <div className={`${color} p-6 rounded-xl shadow-lg border border-gray-200`}>
+      <h3 className="text-lg font-semibold text-gray-500">{title}</h3>
+      <div className="flex items-center mt-2">
+        {icon && <div className="mr-3">{icon}</div>}
+        <p className="text-4xl font-bold text-indigo-600">{value}</p>
+      </div>
+    </div>
+  );
+
+  // Nuevo componente para la vista Kanban de proyectos
+  const KanbanBoard = ({ contacts, quotes, projects, openClientDetailsModal }) => {
+    // Definimos el orden de las columnas del Kanban
+    const statusOrder = ['Primer Contacto', 'Potenciales Clientes', 'Presupuestar', 'Vendido', 'Entregado', 'Archivados'];
+
+    // Lógica para clasificar los items por estado
+    const now = new Date();
+    const itemsByStatus = statusOrder.reduce((acc, status) => ({ ...acc, [status]: [] }), {});
+
+    // Clasificar contactos
+    contacts.forEach(contact => {
+        const thirtyDaysAgo = now.getTime() - (30 * 24 * 60 * 60 * 1000);
+        const createdAt = contact.createdAt?.toDate().getTime() || 0;
+        let finalStatus = contact.status;
+
+        // Automatización para Archivar
+        if (contact.status === 'Primer Contacto' && createdAt < thirtyDaysAgo) {
+            finalStatus = 'Archivados';
+        }
+
+        if (itemsByStatus[finalStatus]) {
+            itemsByStatus[finalStatus].push({ ...contact, type: 'contact' });
+        } else if (finalStatus) {
+            itemsByStatus[finalStatus] = [{ ...contact, type: 'contact' }];
+        }
+    });
+
+    // Clasificar cotizaciones
+    quotes.forEach(quote => {
+        const thirtyDaysAgo = now.getTime() - (30 * 24 * 60 * 60 * 1000);
+        const createdAt = quote.createdAt?.toDate().getTime() || 0;
+        let finalStatus = quote.status;
+
+        // Convertir estados a las columnas del Kanban
+        if (finalStatus === 'Pendiente') {
+            finalStatus = 'Presupuestar';
+        } else if (finalStatus === 'Aceptado') { // Asumimos un estado 'Aceptado'
+            finalStatus = 'Vendido';
+        }
+
+        // Automatización para Archivar
+        if (finalStatus === 'Vendido' && createdAt < thirtyDaysAgo) {
+            finalStatus = 'Archivados';
+        }
+
+        if (itemsByStatus[finalStatus]) {
+            itemsByStatus[finalStatus].push({ ...quote, type: 'quote' });
+        }
+    });
+
+    // Clasificar proyectos
+    projects.forEach(project => {
+        let finalStatus = project.status;
+        if (itemsByStatus[finalStatus]) {
+            itemsByStatus[finalStatus].push({ ...project, type: 'project' });
+        }
+    });
+
+    // Handler para soltar un item
+    const handleDrop = (e, status) => {
+        e.preventDefault();
+        const droppedItemId = e.dataTransfer.getData("itemId");
+        const droppedItemType = e.dataTransfer.getData("itemType");
+        const droppedItemStatus = e.dataTransfer.getData("itemStatus");
+
+        if (droppedItemStatus === status) return; // No hacer nada si se suelta en la misma columna
+
+        if (droppedItemType === 'contact') {
+            updateContactStatus(droppedItemId, status);
+        } else if (droppedItemType === 'quote') {
+            const newStatus = status === 'Presupuestar' ? 'Pendiente' : (status === 'Vendido' ? 'Aceptado' : status);
+            updateQuoteStatus(droppedItemId, newStatus);
+        }
+    };
+
+    const handleDragOver = (e) => {
+        e.preventDefault();
+    };
+
+    return (
+      <div className="flex space-x-6 overflow-x-auto p-4 h-full">
+        {statusOrder.map(status => (
+          <div
+            key={status}
+            className="flex-shrink-0 w-80 h-full flex flex-col"
+            onDrop={(e) => handleDrop(e, status)}
+            onDragOver={handleDragOver}
+          >
+            <h4 className={`text-lg font-bold mb-4 p-2 rounded-lg text-center ${getStatusColor(status)}`}>{status} ({itemsByStatus[status]?.length || 0})</h4>
+            <div className="space-y-4 flex-1 overflow-y-auto p-2 rounded-lg bg-gray-100">
+              {itemsByStatus[status]?.map(item => {
+                const client = contacts.find(c => c.id === (item.clientId || item.id)); // El ID del cliente puede venir de 'clientId' (en quotes/projects) o 'id' (en contacts)
+                return (
+                  <div
+                    key={item.id}
+                    className="bg-white p-4 rounded-xl shadow-lg border border-gray-200 cursor-grab active:cursor-grabbing"
+                    draggable
+                    onDragStart={(e) => {
+                      e.dataTransfer.setData("itemId", item.id);
+                      e.dataTransfer.setData("itemType", item.type);
+                      e.dataTransfer.setData("itemStatus", status);
+                    }}
+                  >
+                    {item.type === 'contact' && (
+                        <>
+                            <p className="font-semibold text-lg text-gray-900">{item.name}</p>
+                            <p className="text-sm text-gray-600 mt-2">{item.projectDetails || 'No hay detalles de proyecto.'}</p>
+                            <div className="mt-3 flex justify-between items-center">
+                                <button
+                                    onClick={() => analyzeClientWithAI(item)}
+                                    disabled={analyzingClientId === item.id}
+                                    className="bg-violet-500 text-white text-xs px-2 py-1 rounded-full flex items-center transition-colors hover:bg-violet-600"
+                                >
+                                    {analyzingClientId === item.id ? <Loader2 size={14} className="animate-spin mr-1"/> : <Sparkles size={14} className="mr-1"/>}
+                                    Analizar con IA
+                                </button>
+                                <button onClick={() => openClientDetailsModal(item)} className="text-sm text-indigo-600 hover:underline flex items-center">
+                                    Ver <ExternalLink size={14} className="ml-1" />
+                                </button>
+                            </div>
+                        </>
+                    )}
+                    {item.type === 'quote' && (
+                        <>
+                            <p className="font-semibold text-lg text-gray-900">Cotización para {item.clientName}</p>
+                            <p className="text-sm text-gray-600 mt-2">Items: {item.items?.map(i => i.productType).join(', ') || 'N/A'}</p>
+                            <div className="mt-3 flex justify-between items-center">
+                                <span className={`text-xs font-semibold px-2.5 py-0.5 rounded-full ${getStatusColor(item.status)}`}>{item.status}</span>
+                                {client && (
+                                    <button onClick={() => openClientDetailsModal(client)} className="text-sm text-indigo-600 hover:underline flex items-center">
+                                        Cliente: {client.name} <ExternalLink size={14} className="ml-1" />
+                                    </button>
+                                )}
+                            </div>
+                        </>
+                    )}
+                    {item.type === 'project' && (
+                        <>
+                            <p className="font-semibold text-lg text-gray-900">{item.title}</p>
+                            <p className="text-sm text-gray-600 mt-2">
+                                Cliente: {contacts.find(c => c.id === item.clientId)?.name || 'N/A'}
+                            </p>
+                            <div className="mt-3 flex justify-between items-center">
+                                <span className={`text-xs font-semibold px-2.5 py-0.5 rounded-full ${getStatusColor(item.status)}`}>
+                                    {item.status}
+                                </span>
+                            </div>
+                        </>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+    );
+  };
+
+  // Componente del CRM
+  const CRM = () => {
+    const [name, setName] = useState('');
+    const [email, setEmail] = useState('');
+    const [phone, setPhone] = useState('');
+    const [address, setAddress] = useState('');
+    const [projectDetails, setProjectDetails] = useState('');
+    const [notes, setNotes] = useState('');
+    const [isSubmitting, setIsSubmitting] = useState(false);
+    const [view, setView] = useState('clientCards'); // 'clientCards' o 'kanbanBoard'
+
+    const handleAddContact = async (e) => {
+      e.preventDefault();
+      if (!db || !userId) {
+        showNotification('Error: La base de datos no está lista.', 'error');
+        return;
+      }
+      if (!name || !email) {
+        showNotification('El nombre y el correo electrónico son obligatorios.', 'error');
+        return;
+      }
+
+      setIsSubmitting(true);
+      try {
+        const contactsCollectionPath = `/artifacts/${appId}/public/data/la_casa_de_las_cortinas_contacts`;
+        await addDoc(collection(db, contactsCollectionPath), {
+          name,
+          email,
+          phone,
+          address,
+          projectDetails,
+          notes,
+          status: 'Primer Contacto', // Nuevo campo de estado para el Kanban
+          createdAt: serverTimestamp(),
+          ownerId: userId,
+        });
+        showNotification('Cliente agregado con éxito.', 'success');
+        setName('');
+        setEmail('');
+        setPhone('');
+        setAddress('');
+        setProjectDetails('');
+        setNotes('');
+      } catch (error) {
+        console.error("Error al agregar cliente:", error);
+        showNotification('Error al agregar el cliente.', 'error');
+      } finally {
+        setIsSubmitting(false);
+      }
+    };
+
+    return (
+      <div className="p-8 h-full flex flex-col">
+        <h2 className="text-4xl font-bold mb-6 text-gray-800">Gestión de Clientes (CRM)</h2>
+        <div className="flex mb-6 space-x-2">
+          <button
+            onClick={() => setView('clientCards')}
+            className={`p-3 rounded-lg font-semibold transition-colors duration-200 ${view === 'clientCards' ? 'bg-indigo-600 text-white' : 'bg-gray-200 text-gray-800 hover:bg-gray-300'}`}
+          >
+            Fichas de Clientes
+          </button>
+          <button
+            onClick={() => setView('kanbanBoard')}
+            className={`p-3 rounded-lg font-semibold transition-colors duration-200 ${view === 'kanbanBoard' ? 'bg-indigo-600 text-white' : 'bg-gray-200 text-gray-800 hover:bg-gray-300'}`}
+          >
+            Vista de Oportunidades por Estado
+          </button>
+        </div>
+
+        {view === 'clientCards' ? (
+          <>
+            <div className="bg-white p-6 rounded-xl shadow-lg border border-gray-200 mb-8">
+              <h3 className="text-2xl font-semibold mb-4 text-gray-700">Agregar Nuevo Cliente</h3>
+              <form onSubmit={handleAddContact} className="grid grid-cols-1 md:grid-cols-2 gap-4 items-end">
+                <input
+                  type="text"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  placeholder="Nombre del Cliente"
+                  className="p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  required
+                />
+                <input
+                  type="email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  placeholder="Correo Electrónico"
+                  className="p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  required
+                />
+                <input
+                  type="tel"
+                  value={phone}
+                  onChange={(e) => setPhone(e.target.value)}
+                  placeholder="Teléfono"
+                  className="p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+                <input
+                  type="text"
+                  value={address}
+                  onChange={(e) => setAddress(e.target.value)}
+                  placeholder="Dirección"
+                  className="p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+                <textarea
+                  value={projectDetails}
+                  onChange={(e) => setProjectDetails(e.target.value)}
+                  placeholder="Detalles del proyecto (ej. Cortinas roller para 3 ventanas, medidas: ...)"
+                  className="p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 md:col-span-2 h-24"
+                />
+                <textarea
+                  value={notes}
+                  onChange={(e) => setNotes(e.target.value)}
+                  placeholder="Notas de seguimiento o historial de la relación con el cliente."
+                  className="p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 md:col-span-2 h-24"
+                />
+                <button
+                  type="submit"
+                  className="bg-indigo-600 text-white p-3 rounded-lg font-semibold hover:bg-indigo-700 transition-colors duration-200 md:col-span-2 flex items-center justify-center"
+                  disabled={isSubmitting}
+                >
+                  {isSubmitting && <Loader2 className="animate-spin mr-2" />}
+                  {isSubmitting ? 'Agregando...' : 'Agregar Ficha de Cliente'}
+                </button>
+              </form>
+            </div>
+            <div className="bg-white p-6 rounded-xl shadow-lg border border-gray-200">
+              <h3 className="text-2xl font-semibold mb-4 text-gray-700">Fichas de Clientes</h3>
+              {loading ? (
+                <div className="flex items-center justify-center p-8">
+                  <Loader2 className="animate-spin text-indigo-500 mr-2" />
+                  <p className="text-gray-500">Cargando clientes...</p>
+                </div>
+              ) : contacts.length > 0 ? (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {contacts.map((contact) => (
+                    <button
+                      key={contact.id}
+                      onClick={() => openClientDetailsModal(contact)}
+                      className="bg-gray-50 p-4 rounded-xl shadow-md border border-gray-200 text-left hover:bg-gray-100 transition-colors duration-200 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    >
+                      <div className="flex items-center space-x-3 mb-2">
+                        <User size={24} className="text-indigo-600" />
+                        <p className="font-semibold text-lg text-gray-900">{contact.name}</p>
+                      </div>
+                      <p className="text-sm text-gray-600 truncate">Email: {contact.email}</p>
+                      <p className="text-sm text-gray-600">Teléfono: {contact.phone || 'N/A'}</p>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-gray-500 text-center">Aún no hay clientes. ¡Agrega uno!</p>
+              )}
+            </div>
+          </>
+        ) : (
+            <div className="flex-1 overflow-auto">
+              <KanbanBoard
+                contacts={contacts}
+                quotes={quotes}
+                projects={projects}
+                openClientDetailsModal={openClientDetailsModal}
+              />
+            </div>
+        )}
+      </div>
+    );
+  };
+
+  // Componente del Formulario de Pedido de Cotización
+  const QuoteRequestForm = () => {
+    // Estado para los campos de contacto del cliente
+    const [selectedClientId, setSelectedClientId] = useState('');
+    const [isNewClient, setIsNewClient] = useState(false);
+    const [newClientName, setNewClientName] = useState('');
+    const [newClientEmail, setNewClientEmail] = useState('');
+    const [newClientPhone, setNewClientPhone] = useState('');
+
+    // Estados para un nuevo item de la cotización
+    const [productType, setProductType] = useState('');
+    const [details, setDetails] = useState('');
+    // Estado para almacenar todos los items de la cotización
+    const [items, setItems] = useState([]);
+    const [isSubmitting, setIsSubmitting] = useState(false);
+
+    // Efecto para autocompletar los datos del cliente si se selecciona uno existente
+    useEffect(() => {
+        if (!isNewClient && selectedClientId) {
+            const client = contacts.find(c => c.id === selectedClientId);
+            if (client) {
+                // No necesitamos autocompletar los estados del nuevo cliente, ya que están ocultos.
+                // Podríamos usar estos datos para la visualización si fuera necesario.
+            }
+        }
+    }, [selectedClientId, isNewClient, contacts]);
+
+    // Función para agregar un item a la lista
+    const handleAddItem = (e) => {
+      e.preventDefault();
+      if (!productType || !details) {
+        showNotification('Por favor, selecciona un producto y agrega los detalles.', 'error');
+        return;
+      }
+      setItems(prevItems => [...prevItems, { productType, details }]);
+      setProductType('');
+      setDetails('');
+    };
+
+    // Función para eliminar un item de la lista
+    const handleRemoveItem = (index) => {
+      setItems(prevItems => prevItems.filter((_, i) => i !== index));
+    };
+
+    const handleRequestQuote = async (e) => {
+      e.preventDefault();
+      if (!db || !userId) {
+        showNotification('Error: La base de datos no está lista.', 'error');
+        return;
+      }
+
+      let clientToUseId = selectedClientId;
+      let clientName = '';
+      let clientEmail = '';
+      let clientPhone = '';
+
+      if (isNewClient) {
+        if (!newClientName || !newClientEmail) {
+          showNotification('El nombre y el correo electrónico del nuevo cliente son obligatorios.', 'error');
+          return;
+        }
+
+        setIsSubmitting(true);
+        try {
+          const contactsCollectionPath = `/artifacts/${appId}/public/data/la_casa_de_las_cortinas_contacts`;
+          const newClientDocRef = await addDoc(collection(db, contactsCollectionPath), {
+            name: newClientName,
+            email: newClientEmail,
+            phone: newClientPhone,
+            status: 'Primer Contacto',
+            createdAt: serverTimestamp(),
+            ownerId: userId,
+          });
+          clientToUseId = newClientDocRef.id;
+          clientName = newClientName;
+          clientEmail = newClientEmail;
+          clientPhone = newClientPhone;
+          showNotification('Nuevo cliente creado con éxito.', 'success');
+        } catch (error) {
+          console.error("Error al crear un nuevo cliente:", error);
+          showNotification('Error al crear un nuevo cliente.', 'error');
+          setIsSubmitting(false);
+          return;
+        }
+      } else {
+        if (!selectedClientId) {
+          showNotification('Por favor, selecciona un cliente existente o crea uno nuevo.', 'error');
+          return;
+        }
+        const existingClient = contacts.find(c => c.id === selectedClientId);
+        if (existingClient) {
+          clientName = existingClient.name;
+          clientEmail = existingClient.email;
+          clientPhone = existingClient.phone;
+        } else {
+          showNotification('Cliente seleccionado no válido.', 'error');
+          return;
+        }
+      }
+
+      if (items.length === 0) {
+        showNotification('Se requiere al menos un item para la cotización.', 'error');
+        setIsSubmitting(false);
+        return;
+      }
+
+      setIsSubmitting(true);
+      try {
+        const quotesCollectionPath = `/artifacts/${appId}/public/data/la_casa_de_las_cortinas_quotes`;
+        await addDoc(collection(db, quotesCollectionPath), {
+          clientId: clientToUseId, // Guardar el ID del cliente
+          clientName: clientName,
+          clientEmail: clientEmail,
+          clientPhone: clientPhone,
+          items, // Se guarda el array de items en la base de datos
+          createdAt: serverTimestamp(),
+          status: 'Pendiente', // Estado inicial
+          ownerId: userId,
+        });
+        showNotification('Solicitud de cotización enviada con éxito.', 'success');
+        setSelectedClientId('');
+        setIsNewClient(false);
+        setNewClientName('');
+        setNewClientEmail('');
+        setNewClientPhone('');
+        setItems([]);
+        // Si hay un item a medio completar, se resetea también
+        setProductType('');
+        setDetails('');
+      } catch (error) {
+        console.error("Error al enviar solicitud de cotización:", error);
+        showNotification('Error al enviar la solicitud.', 'error');
+      } finally {
+        setIsSubmitting(false);
+      }
+    };
+
+    return (
+      <div className="p-8">
+        <h2 className="text-4xl font-bold mb-6 text-gray-800">Pedidos de Cotización</h2>
+        <div className="bg-white p-6 rounded-xl shadow-lg border border-gray-200 mb-8">
+          <h3 className="text-2xl font-semibold mb-4 text-gray-700">Formulario de Solicitud</h3>
+          <form onSubmit={handleRequestQuote} className="space-y-6">
+            {/* Sección de cliente */}
+            <div className="border-b border-gray-200 pb-6 space-y-4">
+              <div className="flex items-center space-x-2">
+                <input
+                  type="checkbox"
+                  id="newClientToggle"
+                  checked={isNewClient}
+                  onChange={(e) => setIsNewClient(e.target.checked)}
+                  className="rounded text-indigo-600 focus:ring-indigo-500"
+                />
+                <label htmlFor="newClientToggle" className="text-lg font-medium text-gray-700">Crear un nuevo cliente</label>
+              </div>
+              {!isNewClient ? (
+                <select
+                  value={selectedClientId}
+                  onChange={(e) => setSelectedClientId(e.target.value)}
+                  className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  required={!isNewClient}
+                >
+                  <option value="" disabled>Selecciona un cliente existente</option>
+                  {contacts.map(client => (
+                    <option key={client.id} value={client.id}>{client.name}</option>
+                  ))}
+                </select>
+              ) : (
+                <div className="space-y-4">
+                  <input
+                    type="text"
+                    value={newClientName}
+                    onChange={(e) => setNewClientName(e.target.value)}
+                    placeholder="Nombre del Nuevo Cliente"
+                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    required={isNewClient}
+                  />
+                  <input
+                    type="email"
+                    value={newClientEmail}
+                    onChange={(e) => setNewClientEmail(e.target.value)}
+                    placeholder="Correo Electrónico del Nuevo Cliente"
+                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    required={isNewClient}
+                  />
+                  <input
+                    type="tel"
+                    value={newClientPhone}
+                    onChange={(e) => setNewClientPhone(e.target.value)}
+                    placeholder="Teléfono del Nuevo Cliente (Opcional)"
+                    className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                </div>
+              )}
+            </div>
+
+            {/* Sección para agregar items */}
+            <div className="border-b border-gray-200 pb-6 space-y-4">
+              <h4 className="text-xl font-semibold text-gray-700">Agregar Items de la Cotización</h4>
+              {/* Formulario para un solo item */}
+              <div className="space-y-4">
+                <select
+                  value={productType}
+                  onChange={(e) => setProductType(e.target.value)}
+                  className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                >
+                  <option value="" disabled>Selecciona el tipo de producto</option>
+                  <option value="Roller">Roller</option>
+                  <option value="Banda Vertical">Banda Vertical</option>
+                  <option value="Veneciana">Veneciana</option>
+                  <option value="Toldo Vertical">Toldo Vertical</option>
+                  <option value="Toldo de Protección">Toldo de Protección</option>
+                  <option value="Cortina Confeccionada">Cortina Confeccionada</option>
+                </select>
+                <textarea
+                  value={details}
+                  onChange={(e) => setDetails(e.target.value)}
+                  placeholder="Detalles del pedido y medidas (ej. Ancho 150cm x Alto 220cm)."
+                  className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 h-24"
+                />
+                <button
+                  onClick={handleAddItem}
+                  className="bg-indigo-500 text-white p-3 rounded-lg font-semibold hover:bg-indigo-600 transition-colors duration-200 w-full flex items-center justify-center"
+                >
+                  <Plus size={20} className="mr-2" />
+                  Agregar Item
+                </button>
+              </div>
+
+              {/* Lista de items agregados */}
+              {items.length > 0 && (
+                <div className="mt-4 space-y-2">
+                  <p className="font-semibold text-gray-700">Items en la cotización:</p>
+                  {items.map((item, index) => (
+                    <div key={index} className="flex items-center justify-between p-3 bg-gray-100 rounded-lg">
+                      <div>
+                        <p className="font-medium text-gray-800">{item.productType}</p>
+                        <p className="text-sm text-gray-600">{item.details}</p>
+                      </div>
+                      <button
+                        onClick={() => handleRemoveItem(index)}
+                        className="text-red-500 hover:text-red-700 p-1"
+                        type="button"
+                      >
+                        <Trash2 size={20} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Botón final para enviar la solicitud */}
+            <button
+              type="submit"
+              className="bg-indigo-600 text-white p-3 rounded-lg font-semibold hover:bg-indigo-700 transition-colors duration-200 w-full flex items-center justify-center"
+              disabled={isSubmitting || items.length === 0 || (!isNewClient && !selectedClientId) || (isNewClient && (!newClientName || !newClientEmail))}
+            >
+              {isSubmitting && <Loader2 className="animate-spin mr-2" />}
+              {isSubmitting ? 'Enviando...' : 'Enviar Solicitud de Cotización'}
+            </button>
+          </form>
+        </div>
+
+        {/* Sección de solicitudes recibidas */}
+        <div className="bg-white p-6 rounded-xl shadow-lg border border-gray-200">
+          <h3 className="text-2xl font-semibold mb-4 text-gray-700">Solicitudes Recibidas</h3>
+          {quotes.length > 0 ? (
+            <div className="space-y-4">
+              {quotes.map((quote) => (
+                <div key={quote.id} className="p-4 bg-gray-50 rounded-lg border border-gray-200">
+                  <div className="flex items-center space-x-2 mb-2">
+                    <p><span className="font-semibold">Cliente:</span></p>
+                    {/* Botón para ver los detalles del cliente */}
+                    {quote.clientId ? (
+                        <button
+                          onClick={() => {
+                            const client = contacts.find(c => c.id === quote.clientId);
+                            if (client) openClientDetailsModal(client);
+                          }}
+                          className="font-medium text-indigo-600 hover:text-indigo-800 hover:underline flex items-center space-x-1"
+                        >
+                          <span>{quote.clientName}</span>
+                          <ExternalLink size={16} />
+                        </button>
+                      ) : (
+                        <span className="text-gray-800">{quote.clientName || 'N/A'}</span>
+                      )}
+                  </div>
+                  {/* Se mapea el array de items para mostrarlos */}
+                  {quote.items && quote.items.map((item, index) => (
+                    <div key={index} className="pl-4 mt-2 border-l-2 border-gray-200">
+                      <p><span className="font-semibold">Producto:</span> {item.productType}</p>
+                      <p><span className="font-semibold">Detalles:</span> {item.details}</p>
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-gray-500 text-center">No hay solicitudes de cotización.</p>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  // Componente de la Galería de Proyectos
+  const ProjectGallery = () => {
+    const [title, setTitle] = useState('');
+    const [description, setDescription] = useState('');
+    const [imageUrl, setImageUrl] = useState('');
+    const [status, setStatus] = useState('En Progreso'); // Nuevo estado
+    const [dueDate, setDueDate] = useState(''); // Nueva fecha de entrega
+    const [isSubmitting, setIsSubmitting] = useState(false);
+    const [selectedClientId, setSelectedClientId] = useState('');
+
+    const handleAddProject = async (e) => {
+      e.preventDefault();
+      if (!db || !userId) {
+        showNotification('Error: La base de datos no está lista.', 'error');
+        return;
+      }
+      if (!title || !imageUrl) {
+        showNotification('El título y la URL de la imagen son obligatorios.', 'error');
+        return;
+      }
+
+      setIsSubmitting(true);
+      try {
+        const projectsCollectionPath = `/artifacts/${appId}/public/data/la_casa_de_las_cortinas_projects`;
+        await addDoc(collection(db, projectsCollectionPath), {
+          title,
+          description,
+          imageUrl,
+          status,
+          dueDate,
+          clientId: selectedClientId, // Vincular el proyecto con el cliente seleccionado
+          createdAt: serverTimestamp(),
+          ownerId: userId,
+        });
+        showNotification('Proyecto agregado con éxito.', 'success');
+        setTitle('');
+        setDescription('');
+        setImageUrl('');
+        setStatus('En Progreso');
+        setDueDate('');
+        setSelectedClientId('');
+      } catch (error) {
+        console.error("Error al agregar proyecto:", error);
+        showNotification('Error al agregar el proyecto.', 'error');
+      } finally {
+        setIsSubmitting(false);
+      }
+    };
+
+    return (
+      <div className="p-8">
+        <h2 className="text-4xl font-bold mb-6 text-gray-800">Galería de Proyectos</h2>
+        <div className="bg-white p-6 rounded-xl shadow-lg border border-gray-200 mb-8">
+          <h3 className="text-2xl font-semibold mb-4 text-gray-700">Agregar Nuevo Proyecto</h3>
+          <form onSubmit={handleAddProject} className="space-y-4">
+            <select
+              value={selectedClientId}
+              onChange={(e) => setSelectedClientId(e.target.value)}
+              className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              required
+            >
+              <option value="" disabled>Selecciona un cliente para vincular</option>
+              {contacts.map(client => (
+                <option key={client.id} value={client.id}>{client.name}</option>
+              ))}
+            </select>
+            <input
+              type="text"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              placeholder="Título del Proyecto"
+              className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              required
+            />
+            <input
+              type="text"
+              value={imageUrl}
+              onChange={(e) => setImageUrl(e.target.value)}
+              placeholder="URL de la imagen (ej: https://placehold.co/600x400)"
+              className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              required
+            />
+            <textarea
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="Descripción del proyecto (opcional)."
+              className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 h-24"
+            />
+            <div className="flex space-x-4">
+              <select
+                value={status}
+                onChange={(e) => setStatus(e.target.value)}
+                className="w-1/2 p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              >
+                <option value="En Progreso">En Progreso</option>
+                <option value="Entregado">Entregado</option>
+              </select>
+              <input
+                type="date"
+                value={dueDate}
+                onChange={(e) => setDueDate(e.target.value)}
+                className="w-1/2 p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              />
+            </div>
+            <button
+              type="submit"
+              className="bg-indigo-600 text-white p-3 rounded-lg font-semibold hover:bg-indigo-700 transition-colors duration-200 w-full flex items-center justify-center"
+              disabled={isSubmitting}
+            >
+              {isSubmitting && <Loader2 className="animate-spin mr-2" />}
+              {isSubmitting ? 'Agregando...' : 'Agregar Proyecto'}
+            </button>
+          </form>
+        </div>
+        <div className="bg-white p-6 rounded-xl shadow-lg border border-gray-200">
+          <h3 className="text-2xl font-semibold mb-4 text-gray-700">Proyectos Destacados</h3>
+          {projects.length > 0 ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+              {projects.map((project) => {
+                let currentStatus = project.status;
+                let statusColor = getStatusColor(currentStatus);
+
+                if (project.dueDate && project.status !== 'Entregado') {
+                  const now = new Date();
+                  const dueDate = new Date(project.dueDate);
+                  const diffInDays = (dueDate - now) / (1000 * 60 * 60 * 24);
+                  if (diffInDays <= 10 && diffInDays > 0) {
+                    currentStatus = 'Alerta de Vencimiento';
+                    statusColor = getStatusColor(currentStatus);
+                  } else if (diffInDays <= 0) {
+                    currentStatus = 'Vencido';
+                    statusColor = getStatusColor(currentStatus);
+                  } else if (diffInDays > 10) {
+                    currentStatus = 'Por Vencer';
+                    statusColor = getStatusColor(currentStatus);
+                  }
+                }
+
+                return (
+                  <div key={project.id} className="bg-gray-50 rounded-xl shadow-md overflow-hidden">
+                    <img src={project.imageUrl} alt={project.title} className="w-full h-48 object-cover" onError={(e) => { e.target.onerror = null; e.target.src = "https://placehold.co/600x400/E5E7EB/4B5563?text=Sin+Imagen"; }} />
+                    <div className="p-4">
+                      <h4 className="font-semibold text-lg">{project.title}</h4>
+                      {project.clientId && (
+                        <p className="text-sm text-gray-500">
+                          Cliente: {contacts.find(c => c.id === project.clientId)?.name || 'N/A'}
+                        </p>
+                      )}
+                      <p className="text-sm text-gray-600 mt-1">{project.description}</p>
+                      <div className="flex items-center justify-between mt-3">
+                        <span className={`text-xs font-semibold px-2.5 py-0.5 rounded-full ${statusColor}`}>
+                          {currentStatus}
+                        </span>
+                        {project.dueDate && (
+                          <p className="text-sm text-gray-500">Fecha de Entrega: {project.dueDate}</p>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="text-gray-500 text-center">No hay proyectos en la galería. ¡Agrega uno!</p>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  // Componente del Calendario de Citas
+  const AppointmentCalendar = () => {
+    const [clientName, setClientName] = useState('');
+    const [date, setDate] = useState('');
+    const [time, setTime] = useState('');
+    const [details, setDetails] = useState('');
+    const [isSubmitting, setIsSubmitting] = useState(false);
+
+    const handleAddAppointment = async (e) => {
+      e.preventDefault();
+      if (!db || !userId) {
+        showNotification('Error: La base de datos no está lista.', 'error');
+        return;
+      }
+      if (!clientName || !date || !time) {
+        showNotification('El nombre, la fecha y la hora son obligatorios.', 'error');
+        return;
+      }
+
+      setIsSubmitting(true);
+      try {
+        const appointmentsCollectionPath = `/artifacts/${appId}/public/data/la_casa_de_las_cortinas_appointments`;
+        await addDoc(collection(db, appointmentsCollectionPath), {
+          clientName,
+          date,
+          time,
+          details,
+          createdAt: serverTimestamp(),
+          ownerId: userId,
+        });
+        showNotification('Cita agendada con éxito.', 'success');
+        setClientName('');
+        setDate('');
+        setTime('');
+        setDetails('');
+      } catch (error) {
+        console.error("Error al agendar cita:", error);
+        showNotification('Error al agendar la cita.', 'error');
+      } finally {
+        setIsSubmitting(false);
+      }
+    };
+
+    const sortedAppointments = [...appointments].sort((a, b) => {
+      const dateA = new Date(`${a.date}T${a.time}`);
+      const dateB = new Date(`${b.date}T${b.time}`);
+      return dateA - dateB;
+    });
+
+    return (
+      <div className="p-8">
+        <h2 className="text-4xl font-bold mb-6 text-gray-800">Calendario de Citas</h2>
+        <div className="bg-white p-6 rounded-xl shadow-lg border border-gray-200 mb-8">
+          <h3 className="text-2xl font-semibold mb-4 text-gray-700">Agendar Nueva Cita</h3>
+          <form onSubmit={handleAddAppointment} className="space-y-4">
+            <input
+              type="text"
+              value={clientName}
+              onChange={(e) => setClientName(e.target.value)}
+              placeholder="Nombre del Cliente"
+              className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              required
+            />
+            <div className="flex space-x-4">
+              <input
+                type="date"
+                value={date}
+                onChange={(e) => setDate(e.target.value)}
+                className="w-1/2 p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                required
+              />
+              <input
+                type="time"
+                value={time}
+                onChange={(e) => setTime(e.target.value)}
+                className="w-1/2 p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                required
+              />
+            </div>
+            <textarea
+              value={details}
+              onChange={(e) => setDetails(e.target.value)}
+              placeholder="Detalles de la cita (ej. Medición para cortinas roller en dormitorio principal)."
+              className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 h-24"
+            />
+            <button
+              type="submit"
+              className="bg-indigo-600 text-white p-3 rounded-lg font-semibold hover:bg-indigo-700 transition-colors duration-200 w-full flex items-center justify-center"
+              disabled={isSubmitting}
+            >
+              {isSubmitting && <Loader2 className="animate-spin mr-2" />}
+              {isSubmitting ? 'Agendando...' : 'Agendar Cita'}
+            </button>
+          </form>
+        </div>
+        <div className="bg-white p-6 rounded-xl shadow-lg border border-gray-200">
+          <h3 className="text-2xl font-semibold mb-4 text-gray-700">Próximas Citas</h3>
+          {sortedAppointments.length > 0 ? (
+            <div className="space-y-4">
+              {sortedAppointments.map((appt) => (
+                <div key={appt.id} className="p-4 bg-gray-50 rounded-lg border border-gray-200">
+                  <p><span className="font-semibold">Cliente:</span> {appt.clientName}</p>
+                  <p><span className="font-semibold">Fecha y Hora:</span> {appt.date} a las {appt.time}</p>
+                  <p><span className="font-semibold">Detalles:</span> {appt.details}</p>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="text-gray-500 text-center">No hay citas agendadas.</p>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+
+  // Componente de Automatización de Google Ads
+  const AdsAutomation = () => {
+    const [productDescription, setProductDescription] = useState('');
+
+    const handleGenerateAds = () => {
+      const prompt = `Actúa como un experto en Google Ads para una cortinería. Genera 3 títulos atractivos (máximo 30 caracteres cada uno) y 2 descripciones persuasivas (máximo 90 caracteres cada una) para una campaña de Google Ads. El producto o servicio es: "${productDescription}". Responde con un formato claro, listando los títulos y las descripciones por separado.`;
+      generateContentWithGemini(prompt);
+    };
+
+    return (
+      <div className="p-8">
+        <h2 className="text-4xl font-bold mb-6 text-gray-800">Automatización de Anuncios (Cortinería)</h2>
+        <div className="bg-white p-6 rounded-xl shadow-lg border border-gray-200">
+          <h3 className="text-2xl font-semibold mb-4 text-gray-700">Generador de Copys para Anuncios</h3>
+          <div className="space-y-4">
+            <textarea
+              className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 h-32"
+              placeholder="Describe el producto o servicio (ej. 'Cortinas roller black out a medida con instalación')."
+              value={productDescription}
+              onChange={(e) => setProductDescription(e.target.value)}
+            />
+            <button
+              onClick={handleGenerateAds}
+              disabled={generationLoading || !productDescription}
+              className="bg-indigo-600 text-white p-3 rounded-lg font-semibold hover:bg-indigo-700 transition-colors duration-200 w-full flex items-center justify-center"
+            >
+              {generationLoading && <Loader2 className="animate-spin mr-2" />}
+              {generationLoading ? 'Generando...' : 'Generar Copys para Anuncios'}
+            </button>
+          </div>
+          {generatedContent && (
+            <div className="mt-6 p-4 bg-gray-50 rounded-lg border border-gray-200 whitespace-pre-wrap">
+              <h4 className="font-semibold mb-2">Contenido Generado:</h4>
+              <p>{generatedContent}</p>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  // Componente de Gestión de Redes Sociales
+  const SocialMedia = () => {
+    const [postTopic, setPostTopic] = useState('');
+
+    const handleGeneratePost = () => {
+      const prompt = `Actúa como un gestor de redes sociales experto para una cortinería. Crea una publicación atractiva y profesional para Instagram sobre el siguiente tema: "${postTopic}". Usa emojis y hashtags populares como #CortinasModernas #DiseñoDeInteriores.`;
+      generateContentWithGemini(prompt);
+    };
+
+    return (
+      <div className="p-8">
+        <h2 className="text-4xl font-bold mb-6 text-gray-800">Automatización de Redes Sociales</h2>
+        <div className="bg-white p-6 rounded-xl shadow-lg border border-gray-200">
+          <h3 className="text-2xl font-semibold mb-4 text-gray-700">Generador de Publicaciones</h3>
+          <div className="space-y-4">
+            <textarea
+              className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 h-32"
+              placeholder="Introduce el tema de la publicación (ej. 'Tendencias de cortinas para dormitorios en 2025')."
+              value={postTopic}
+              onChange={(e) => setPostTopic(e.target.value)}
+            />
+            <button
+              onClick={handleGeneratePost}
+              disabled={generationLoading || !postTopic}
+              className="bg-indigo-600 text-white p-3 rounded-lg font-semibold hover:bg-indigo-700 transition-colors duration-200 w-full flex items-center justify-center"
+            >
+              {generationLoading && <Loader2 className="animate-spin mr-2" />}
+              {generationLoading ? 'Generando...' : 'Generar Publicación para Instagram'}
+            </button>
+          </div>
+          {generatedContent && (
+            <div className="mt-6 p-4 bg-gray-50 rounded-lg border border-gray-200 whitespace-pre-wrap">
+              <h4 className="font-semibold mb-2">Contenido Generado:</h4>
+              <p>{generatedContent}</p>
+              <button
+                onClick={() => {
+                  document.execCommand('copy');
+                  showNotification('¡Contenido copiado al portapapeles!', 'success');
+                }}
+                className="mt-4 text-sm text-indigo-600 font-semibold hover:underline"
+              >
+                Copiar al Portapapeles
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  // Componente de integración con WhatsApp
+  const WhatsAppIntegration = () => {
+    const [contactName, setContactName] = useState('');
+    const [contactPhone, setContactPhone] = useState('');
+    const [messagePurpose, setMessagePurpose] = useState('');
+
+    // Función para generar un mensaje con IA
+    const handleGenerateMessage = () => {
+      const prompt = `Actúa como un asistente de ventas de una cortinería. Escribe un mensaje corto y directo para WhatsApp, usando un tono amigable pero formal. El mensaje debe ser para el cliente "${contactName}" con el propósito de "${messagePurpose}". Incluye un saludo y una llamada a la acción clara.`;
+      generateContentWithGemini(prompt);
+    };
+
+    // Función para enviar el mensaje a WhatsApp
+    const handleSendWhatsApp = () => {
+        if (!generatedContent || !contactPhone) {
+            showNotification('Primero genera un mensaje y agrega un número de teléfono.', 'error');
+            return;
+        }
+        // Limpia el número de teléfono para el enlace de WhatsApp
+        const cleanPhone = contactPhone.replace(/\D/g, '');
+        const encodedMessage = encodeURIComponent(generatedContent);
+        const url = `https://wa.me/${cleanPhone}?text=${encodedMessage}`;
+        window.open(url, '_blank');
+    };
+
+    return (
+      <div className="p-8">
+        <h2 className="text-4xl font-bold mb-6 text-gray-800">Integración con WhatsApp</h2>
+        <div className="bg-white p-6 rounded-xl shadow-lg border border-gray-200">
+          <h3 className="text-2xl font-semibold mb-4 text-gray-700">Generador de Mensajes</h3>
+          <div className="space-y-4">
+            <div className="flex flex-col sm:flex-row gap-4">
+              <div className="flex-1">
+                <label className="block text-sm font-medium text-gray-700">Seleccionar Cliente</label>
+                <select
+                  value={contactName}
+                  onChange={(e) => {
+                    const selectedClient = contacts.find(c => c.name === e.target.value);
+                    setContactName(e.target.value);
+                    if (selectedClient) {
+                        setContactPhone(selectedClient.phone || '');
+                    }
+                  }}
+                  className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 mt-1"
+                >
+                  <option value="" disabled>Selecciona un cliente</option>
+                  {contacts.map(contact => (
+                    <option key={contact.id} value={contact.name}>{contact.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex-1">
+                <label className="block text-sm font-medium text-gray-700">Teléfono</label>
+                <input
+                  type="tel"
+                  className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 mt-1"
+                  placeholder="Número de teléfono (ej. 54911xxxxxxx)"
+                  value={contactPhone}
+                  onChange={(e) => setContactPhone(e.target.value)}
+                />
+              </div>
+            </div>
+
+            <textarea
+              className="w-full p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500 h-32"
+              placeholder="Describe el propósito del mensaje (ej. 'Recordar cita de medición para mañana')."
+              value={messagePurpose}
+              onChange={(e) => setMessagePurpose(e.target.value)}
+            />
+            <button
+              onClick={handleGenerateMessage}
+              disabled={generationLoading || !contactName || !messagePurpose}
+              className="bg-indigo-600 text-white p-3 rounded-lg font-semibold hover:bg-indigo-700 transition-colors duration-200 w-full flex items-center justify-center"
+            >
+              {generationLoading && <Loader2 className="animate-spin mr-2" />}
+              {generationLoading ? 'Generando...' : 'Generar Mensaje de WhatsApp'}
+            </button>
+          </div>
+          {generatedContent && (
+            <div className="mt-6 p-4 bg-gray-50 rounded-lg border border-gray-200 whitespace-pre-wrap">
+              <h4 className="font-semibold mb-2">Mensaje Generado:</h4>
+              <p>{generatedContent}</p>
+              <div className="mt-4 flex space-x-2">
+                <button
+                  onClick={() => {
+                    document.execCommand('copy');
+                    showNotification('¡Mensaje copiado al portapapeles!', 'success');
+                  }}
+                  className="flex-1 bg-gray-700 text-white p-3 rounded-lg font-semibold hover:bg-gray-800 transition-colors duration-200 flex items-center justify-center"
+                >
+                  <Copy size={20} className="mr-2" />
+                  Copiar
+                </button>
+                <button
+                  onClick={handleSendWhatsApp}
+                  className="flex-1 bg-green-600 text-white p-3 rounded-lg font-semibold hover:bg-green-700 transition-colors duration-200 flex items-center justify-center"
+                  disabled={!contactPhone}
+                >
+                  <Send size={20} className="mr-2" />
+                  Enviar por WhatsApp
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+
+  // Componente del Chatbot
+  const WhatsAppChatbot = () => {
+    const [messages, setMessages] = useState([{
+      sender: 'bot',
+      text: '¡Hola! Soy tu asistente de "La Casa de las Cortinas". ¿En qué puedo ayudarte con tus cortinas o persianas?',
+    }]);
+    const [userInput, setUserInput] = useState('');
+    const [isTyping, setIsTyping] = useState(false);
+    const chatContainerRef = useRef(null);
+    const inputRef = useRef(null);
+    const [isAnalyzing, setIsAnalyzing] = useState(false);
+    const [analysisResult, setAnalysisResult] = useState(null);
+
+    // Función para enviar un mensaje al chatbot
+    const handleSendMessage = async (e) => {
+      e.preventDefault();
+      if (!userInput.trim()) return;
+
+      const newUserMessage = userInput.trim();
+      setMessages(prev => [...prev, { sender: 'user', text: newUserMessage }]);
+      setUserInput('');
+      setIsTyping(true);
+
+      // Desplazar el chat al final para mostrar el mensaje del usuario
+      setTimeout(() => {
+        if (chatContainerRef.current) {
+          chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
+        }
+      }, 100);
+
+      // Llamar a Gemini para la respuesta
+      const botResponse = await generateChatbotResponse(newUserMessage);
+
+      setIsTyping(false);
+      setMessages(prev => [...prev, { sender: 'bot', text: botResponse }]);
+
+      // Desplazar el chat al final para mostrar la respuesta del bot
+      setTimeout(() => {
+        if (chatContainerRef.current) {
+          chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
+        }
+      }, 100);
+    };
+
+    // Función para analizar el chat y filtrar clientes potenciales
+    const handleAnalyzeChat = async () => {
+      setIsAnalyzing(true);
+      setAnalysisResult(null);
+
+      const chatHistoryText = messages.map(msg => `${msg.sender}: ${msg.text}`).join('\n');
+      const prompt = `Analiza la siguiente conversación de un chatbot de una cortinería. Tu tarea es determinar si la persona es un cliente potencial, es decir, si muestra un interés genuino en comprar, pedir un presupuesto o agendar una cita. Ignora preguntas genéricas. La conversación es: \n\n${chatHistoryText}\n\nResponde SOLO con "Sí" o "No", seguido de una breve explicación de por qué. No agregues saludos ni información adicional.`;
+
+      try {
+        let retryCount = 0;
+        const maxRetries = 3;
+        let response;
+
+        while (retryCount < maxRetries) {
+          try {
+            const payload = { contents: [{ role: "user", parts: [{ text: prompt }] }] };
+
+            response = await fetch(geminiApiUrl, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload)
+            });
+
+            if (!response.ok) {
+              if (response.status === 429) {
+                const delay = Math.pow(2, retryCount) * 1000;
+                await new Promise(resolve => setTimeout(resolve, delay));
+                retryCount++;
+                continue;
+              } else {
+                throw new Error(`Error en la API: ${response.status} ${response.statusText}`);
+              }
+            }
+
+            const result = await response.json();
+            const analysis = result?.candidates?.[0]?.content?.parts?.[0]?.text;
+            if (analysis) {
+              setAnalysisResult(analysis);
+              setIsClientModalOpen(true);
+            } else {
+              showNotification('No se pudo realizar el análisis.', 'error');
+            }
+            break;
+          } catch (error) {
+            console.error("Error al llamar a la API de Gemini para análisis:", error);
+            if (retryCount < maxRetries - 1) {
+              const delay = Math.pow(2, retryCount) * 1000;
+              await new Promise(resolve => setTimeout(resolve, delay));
+              retryCount++;
+            } else {
+              showNotification('Error al analizar la conversación.', 'error');
+            }
+          }
+        }
+      } catch (error) {
+        showNotification('Hubo un error grave al analizar el chat.', 'error');
+      } finally {
+        setIsAnalyzing(false);
+      }
+    };
+
+    // Función para copiar el historial de chat al portapapeles
+    const handleCopyChat = () => {
+      const chatHistoryText = messages.map(msg => `[${msg.sender === 'user' ? 'Cliente' : 'Asistente'}] ${msg.text}`).join('\n');
+      const tempTextArea = document.createElement('textarea');
+      tempTextArea.value = chatHistoryText;
+      document.body.appendChild(tempTextArea);
+      tempTextArea.select();
+      document.execCommand('copy');
+      document.body.removeChild(tempTextArea);
+      showNotification('Conversación copiada al portapapeles.', 'success');
+    };
+
+    // Efecto para enfocar el input y desplazar al final cuando hay nuevos mensajes
+    useEffect(() => {
+        if (chatContainerRef.current) {
+          chatContainerRef.current.scrollTop = chatContainerRef.current.scrollHeight;
+        }
+        if (inputRef.current) {
+          inputRef.current.focus();
+        }
+    }, [messages, isTyping]);
+
+    return (
+      <div className="p-8 h-full flex flex-col">
+        <h2 className="text-4xl font-bold mb-6 text-gray-800">Chatbot de WhatsApp</h2>
+        <div className="bg-white p-6 rounded-xl shadow-lg border border-gray-200 flex-1 flex flex-col">
+          {/* Contenedor de mensajes */}
+          <div ref={chatContainerRef} className="flex-1 overflow-y-auto space-y-4 p-4">
+            {messages.map((msg, index) => (
+              <div key={index} className={`flex ${msg.sender === 'user' ? 'justify-end' : 'justify-start'}`}>
+                <div className={`p-3 rounded-lg max-w-xs md:max-w-md ${
+                  msg.sender === 'user' ? 'bg-indigo-600 text-white rounded-br-none' : 'bg-gray-200 text-gray-800 rounded-bl-none'
+                }`}>
+                  <p>{msg.text}</p>
+                </div>
+              </div>
+            ))}
+            {isTyping && (
+              <div className="flex justify-start">
+                <div className="p-3 rounded-lg bg-gray-200 text-gray-800 rounded-bl-none">
+                  <p className="animate-pulse">La Casa de las Cortinas está escribiendo...</p>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Formulario de entrada */}
+          <form onSubmit={handleSendMessage} className="flex space-x-2 mt-4">
+            <input
+              type="text"
+              ref={inputRef}
+              value={userInput}
+              onChange={(e) => setUserInput(e.target.value)}
+              placeholder="Escribe tu mensaje..."
+              className="flex-1 p-3 border rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              disabled={isTyping}
+            />
+            <button
+              type="submit"
+              className="bg-indigo-600 text-white p-3 rounded-lg font-semibold hover:bg-indigo-700 transition-colors duration-200 flex items-center justify-center"
+              disabled={isTyping || !userInput.trim()}
+            >
+              {isTyping ? <Loader2 className="animate-spin" /> : 'Enviar'}
+            </button>
+          </form>
+
+          {/* Botones de análisis y copia */}
+          <div className="mt-4 flex space-x-2 justify-end">
+            <button
+              onClick={handleAnalyzeChat}
+              disabled={isAnalyzing || messages.length <= 1}
+              className="bg-green-500 text-white p-3 rounded-lg font-semibold hover:bg-green-600 transition-colors duration-200 flex items-center"
+            >
+              {isAnalyzing ? <Loader2 className="animate-spin mr-2" /> : <Filter size={20} className="mr-2" />}
+              {isAnalyzing ? 'Analizando...' : 'Filtrar Cliente Potencial'}
+            </button>
+            <button
+              onClick={handleCopyChat}
+              disabled={messages.length <= 1}
+              className="bg-gray-700 text-white p-3 rounded-lg font-semibold hover:bg-gray-800 transition-colors duration-200 flex items-center"
+            >
+              <Copy size={20} className="mr-2" />
+              Copiar Chat
+            </button>
+          </div>
+        </div>
+
+        {/* Modal de resultado de análisis */}
+        <ClientDetailsModal
+          client={analysisResult}
+          onClose={() => {
+              setIsClientModalOpen(false);
+              setAnalysisResult(null);
+          }}
+        />
+      </div>
+    );
+  };
+
+
+  // Renderiza el contenido principal según la página activa
+  const renderPage = () => {
+    switch (activePage) {
+      case 'crm':
+        return <CRM />;
+      case 'quotes':
+        return <QuoteRequestForm />;
+      case 'gallery':
+        return <ProjectGallery />;
+      case 'calendar':
+        return <AppointmentCalendar />;
+      case 'ads':
+        return <AdsAutomation />;
+      case 'social':
+        return <SocialMedia />;
+      case 'whatsapp':
+        return <WhatsAppIntegration />;
+      case 'chatbot':
+        return <WhatsAppChatbot />;
+      case 'dashboard':
+      default:
+        return <Dashboard />;
+    }
+  };
+
+  return (
+    <div className="flex bg-gray-100 min-h-screen font-sans antialiased">
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+        .font-sans {
+          font-family: 'Inter', sans-serif;
+        }
+      `}</style>
+      <Sidebar />
+      <main className="flex-1 p-4 md:p-8 overflow-y-auto rounded-r-2xl flex flex-col">
+        {notification.message && (
+          <div className={`fixed top-4 right-4 p-4 rounded-lg shadow-xl text-white flex items-center space-x-2 z-50 transition-transform transform duration-300 ${
+            notification.type === 'success' ? 'bg-green-500' : 'bg-red-500'
+          }`}>
+            {notification.type === 'success' ? <CheckCircle size={20} /> : <XCircle size={20} />}
+            <span>{notification.message}</span>
+          </div>
+        )}
+        {renderPage()}
+        {/* Modal de detalles del cliente centralizado */}
+        <ClientDetailsModal
+          client={selectedClientForModal}
+          projects={projects}
+          onClose={closeClientDetailsModal}
+        />
+      </main>
+    </div>
+  );
+};
+
+export default App;
